@@ -1,823 +1,821 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { 
-  Upload, FileDown, ChevronDown, Check, LayoutDashboard, 
-  AlertCircle, ListChecks, FileText, Loader2,
-  Sparkles, TrendingUp, Lightbulb, ShieldAlert, MessageSquareText
-} from 'lucide-react';
-
-// --- Utility Functions ---
-// Robust CSV Parser handling quotes and commas inside fields
-const parseCSV = (csvText) => {
-  const result = [];
-  // Split by newline, ignoring newlines inside quotes
-  const lines = csvText.split(/\r?\n(?=(?:(?:[^"]*"){2})*[^"]*$)/);
-  if (lines.length === 0) return result;
-  
-  // Split headers
-  const headers = lines[0].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(h => h.trim().replace(/^"|"$/g, ''));
-
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    const currentline = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
-    const obj = {};
-    for (let j = 0; j < headers.length; j++) {
-      let val = currentline[j] ? currentline[j].trim() : '';
-      // Remove starting and ending quotes, and unescape double quotes
-      val = val.replace(/^"|"$/g, '').replace(/""/g, '"');
-      obj[headers[j]] = val;
-    }
-    result.push(obj);
-  }
-  return result;
-};
-
-// Helper function to format date as MM-YYYY
-const getMonthYear = (dateString) => {
-  if (!dateString) return "";
-  try {
-    const dateObj = new Date(dateString);
-    if (!isNaN(dateObj)) {
-      return `${String(dateObj.getMonth() + 1).padStart(2, '0')}-${dateObj.getFullYear()}`;
-    }
-    // Fallback for YYYY-MM-DD strings
-    const parts = dateString.split('-');
-    if (parts.length >= 2 && parts[0].length === 4) {
-      return `${parts[1]}-${parts[0]}`;
-    }
-    return dateString;
-  } catch (e) {
-    return dateString;
-  }
-};
-
-// Custom Multi-Select Dropdown Component
-const MultiSelect = ({ label, options, selected, onChange }) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const dropdownRef = useRef(null);
-
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
-        setIsOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
-
-  const toggleOption = (option) => {
-    if (selected.includes(option)) {
-      onChange(selected.filter(item => item !== option));
-    } else {
-      onChange([...selected, option]);
-    }
-  };
-
-  return (
-    <div className="relative" ref={dropdownRef}>
-      <label className="block text-xs font-semibold text-slate-500 mb-1">{label}</label>
-      <div 
-        className="min-h-[40px] w-full bg-white border border-slate-300 rounded-lg p-2 flex items-center justify-between cursor-pointer hover:border-blue-500 transition-colors"
-        onClick={() => setIsOpen(!isOpen)}
-      >
-        <div className="flex flex-wrap gap-1 overflow-hidden">
-          {selected.length === 0 ? (
-            <span className="text-slate-400 text-sm">ທັງໝົດ</span>
-          ) : selected.length <= 2 ? (
-            selected.map((item, idx) => (
-              <span key={idx} className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-md max-w-[100px] truncate">
-                {item}
-              </span>
-            ))
-          ) : (
-            <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-md">
-              ເລືອກ {selected.length} ລາຍການ
-            </span>
-          )}
-        </div>
-        <ChevronDown size={16} className={`text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-      </div>
-
-      {isOpen && (
-        <div className="absolute z-50 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl max-h-60 overflow-y-auto">
-          {options.length === 0 ? (
-            <div className="p-3 text-sm text-slate-500 text-center">ບໍ່ມີຂໍ້ມູນ</div>
-          ) : (
-            options.map((option, idx) => {
-              const isSelected = selected.includes(option);
-              return (
-                <div 
-                  key={idx} 
-                  className={`p-2.5 text-sm cursor-pointer flex items-center hover:bg-slate-50 ${isSelected ? 'bg-blue-50 text-blue-700' : 'text-slate-700'}`}
-                  onClick={() => toggleOption(option)}
-                >
-                  <div className={`w-4 h-4 rounded border mr-2 flex items-center justify-center ${isSelected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'}`}>
-                    {isSelected && <Check size={12} className="text-white" />}
-                  </div>
-                  <span className="truncate">{option || 'N/A'}</span>
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
-
-
-// --- Main Application Component ---
-export default function App() {
-  const [allData, setAllData] = useState([]);
-  const [kapData, setKapData] = useState([]);
-  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
-  
-  // AI Chat State
-  const [qaInput, setQaInput] = useState('');
-  const [chatHistory, setChatHistory] = useState([]);
-  const [isAiThinking, setIsAiThinking] = useState(false);
-
-  // Filters State
-  const [filters, setFilters] = useState({
-    province: [],
-    district: [],
-    healthCenter: [],
-    roundNo: [],
-    monthYear: []
-  });
-
-  // Handle File Uploads
-  const handleFileUpload = (e, type) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const text = evt.target.result;
-      const parsed = parseCSV(text);
-      if (type === 'all') setAllData(parsed);
-      if (type === 'kap') setKapData(parsed);
-    };
-    reader.readAsText(file);
-  };
-
-  // --- Filtering Logic (Cascading) ---
-  const filteredAllData = useMemo(() => {
-    return allData.filter(row => {
-      // Month Year is derived from Date of visit
-      const rowMonthYear = getMonthYear(row['Date of visit']);
-
-      return (
-        (filters.province.length === 0 || filters.province.includes(row.province)) &&
-        (filters.district.length === 0 || filters.district.includes(row.district)) &&
-        (filters.healthCenter.length === 0 || filters.healthCenter.includes(row['health center'])) &&
-        (filters.roundNo.length === 0 || filters.roundNo.includes(row['Round no'])) &&
-        (filters.monthYear.length === 0 || filters.monthYear.includes(rowMonthYear))
-      );
-    });
-  }, [allData, filters]);
-
-  // Dynamically generate options based on CURRENT filter state (Cascading)
-  const filterOptions = useMemo(() => {
-    const options = { province: new Set(), district: new Set(), healthCenter: new Set(), roundNo: new Set(), monthYear: new Set() };
+<!DOCTYPE html>
+<html lang="lo">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RDQA Dashboard</title>
     
-    // To make it truly cascading, we look at the data before applying the *current field's* filter
-    allData.forEach(row => {
-      // Logic to extract MM-YYYY
-      const rowMonthYear = getMonthYear(row['Date of visit']);
-
-      const matchProv = filters.province.length === 0 || filters.province.includes(row.province);
-      const matchDist = filters.district.length === 0 || filters.district.includes(row.district);
-      const matchHC = filters.healthCenter.length === 0 || filters.healthCenter.includes(row['health center']);
-      const matchRound = filters.roundNo.length === 0 || filters.roundNo.includes(row['Round no']);
-      const matchMY = filters.monthYear.length === 0 || filters.monthYear.includes(rowMonthYear);
-
-      // Populate options if it matches OTHER filters
-      if (matchDist && matchHC && matchRound && matchMY) if(row.province) options.province.add(row.province);
-      if (matchProv && matchHC && matchRound && matchMY) if(row.district) options.district.add(row.district);
-      if (matchProv && matchDist && matchRound && matchMY) if(row['health center']) options.healthCenter.add(row['health center']);
-      if (matchProv && matchDist && matchHC && matchMY) if(row['Round no']) options.roundNo.add(row['Round no']);
-      if (matchProv && matchDist && matchHC && matchRound) if(rowMonthYear) options.monthYear.add(rowMonthYear);
-    });
-
-    return {
-      province: Array.from(options.province).sort(),
-      district: Array.from(options.district).sort(),
-      healthCenter: Array.from(options.healthCenter).sort(),
-      roundNo: Array.from(options.roundNo).sort(),
-      monthYear: Array.from(options.monthYear).sort()
-    };
-  }, [allData, filters]);
-
-
-  // --- Calculations for Sections ---
-
-  // Section 1: KPIs
-  const kpiData = useMemo(() => {
-    const distSet = new Set();
-    const hcSet = new Set();
-    const indSet = new Set();
-
-    // ນໍາໃຊ້ຂໍ້ມູນທີ່ຖືກກັ່ນຕອງແລ້ວ (filteredAllData) ມາຄິດໄລ່ ເພື່ອໃຫ້ເຊື່ອມໂຍງກັບທຸກໆແທັບແບບ 100%
-    filteredAllData.forEach(r => {
-      if (r.district) distSet.add(r.district);
-      if (r['health center']) hcSet.add(r['health center']);
-      if (r.indicator_name) indSet.add(r.indicator_name);
-    });
-
-    return {
-      districts: distSet.size,
-      healthCenters: hcSet.size,
-      indicators: indSet.size
-    };
-  }, [filteredAllData]);
-
-  // Section 2: Quality Components Averages
-  const qualityMetrics = useMemo(() => {
-    const keys = [
-      'completeness_monthly_report', 'monthly report availability', 'monthly report standard',
-      'monthly report deadline submission', 'completeness source document', 'source document availavility',
-      'source document standard', 'accuracy_dhis2', 'consistency', 'system_assesment'
-    ];
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    const sums = {};
-    const counts = {};
-    keys.forEach(k => { sums[k] = 0; counts[k] = 0; });
-
-    filteredAllData.forEach(row => {
-      keys.forEach(key => {
-        let val = parseFloat(row[key]);
-        if (!isNaN(val)) {
-          sums[key] += val;
-          counts[key] += 1;
-        }
-      });
-    });
-
-    const result = [];
-    keys.forEach(key => {
-      const avg = counts[key] > 0 ? (sums[key] / counts[key]).toFixed(1) : 0;
-      // Make label beautiful
-      const label = key.split('_').join(' ').replace(/\b\w/g, l => l.toUpperCase());
-      result.push({ key, label, value: parseFloat(avg) });
-    });
-
-    return result;
-  }, [filteredAllData]);
-
-  // Section 3: Causes Aggregation
-  const causesData = useMemo(() => {
-    const inaccuracy = {};
-    const inconsistency = {};
-
-    filteredAllData.forEach(row => {
-      const rInacc = row['reason of inaccuracy'];
-      const rIncons = row['reason of inconsistency'];
-
-      if (rInacc && rInacc !== 'No discrepancy - ບໍ່ມີຄ່າຜິດດ່ຽງ' && rInacc.trim() !== '') {
-        const parts = rInacc.split(',').map(s => s.trim());
-        parts.forEach(p => inaccuracy[p] = (inaccuracy[p] || 0) + 1);
-      }
-      if (rIncons && rIncons !== 'No consistency - ບໍ່ມີບັນຫາຄວາມບໍ່ຕໍ່ເນື່ອງຂອງຂໍ້ມູນ' && rIncons.trim() !== '') {
-        const parts = rIncons.split(',').map(s => s.trim());
-        parts.forEach(p => inconsistency[p] = (inconsistency[p] || 0) + 1);
-      }
-    });
-
-    // Sort by count descending
-    const sortObj = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]).map(e => ({ name: e[0], count: e[1] }));
-
-    return {
-      inaccuracy: sortObj(inaccuracy),
-      inconsistency: sortObj(inconsistency)
-    };
-  }, [filteredAllData]);
-
-  // Section 4: Gaps & Actions (Relationship via event_id)
-  const gapsActionsData = useMemo(() => {
-    // Get active event_ids from filtered allData
-    const activeEventIds = new Set(filteredAllData.map(r => r.event_id).filter(id => id));
-
-    // Filter kapData based on active event_ids
-    return kapData.filter(row => activeEventIds.has(row.event_id));
-  }, [filteredAllData, kapData]);
-
-
-  // --- 💡 SECTION 5: AI Insights Logic (Simulated) ---
-  const aiInsightsData = useMemo(() => {
-    if (filteredAllData.length === 0) return null;
-
-    // 1. Trend Analysis (ວິເຄາະແນວໂນ້ມ)
-    const avgAcc = (filteredAllData.reduce((sum, r) => sum + (parseFloat(r.accuracy_dhis2) || 0), 0) / filteredAllData.length).toFixed(1);
-    const topCause = causesData.inaccuracy[0]?.name || '-';
-    const trendText = `ຈາກການກັ່ນຕອງຂໍ້ມູນປະຈຸບັນ, ຄ່າສະເລ່ຍຄວາມຖືກຕ້ອງ (Accuracy) ຢູ່ທີ່ ${avgAcc}%. ໂດຍມີແນວໂນ້ມຄວາມຜິດດ່ຽງມາຈາກສາເຫດຫຼັກຄື "${topCause}".`;
-
-    // 2. Actionable Recommendations (ແນະນໍາວິທີແກ້ໄຂ)
-    // ຊອກຫາສຸກສາລາທີ່ມີຄະແນນ Accuracy ຕໍ່າສຸດ
-    const hcScores = {};
-    filteredAllData.forEach(r => {
-      const hc = r['health center'];
-      if(hc) {
-        if(!hcScores[hc]) hcScores[hc] = { sum: 0, count: 0 };
-        hcScores[hc].sum += (parseFloat(r.accuracy_dhis2) || 0);
-        hcScores[hc].count += 1;
-      }
-    });
-    let worstHc = { name: '', score: 100 };
-    Object.keys(hcScores).forEach(hc => {
-      const avg = hcScores[hc].sum / hcScores[hc].count;
-      if (avg < worstHc.score) worstHc = { name: hc, score: avg };
-    });
-    const recText = worstHc.name 
-      ? `ຄວນຈັດບຸລິມະສິດລົງຕິດຕາມ ແລະ ຊ່ວຍເຫຼືອ "ສຸກສາລາ ${worstHc.name}" ເປັນພິເສດ ເນື່ອງຈາກມີຄະແນນຄວາມຖືກຕ້ອງສະເລ່ຍຕໍ່າສຸດ (${worstHc.score.toFixed(1)}%). ພ້ອມທັງແນະນຳໃຫ້ທົບທວນການບັນທຶກເອກະສານອ້າງອີງຄືນໃໝ່ໃຫ້ຮັດກຸມຂຶ້ນ.` 
-      : 'ຮັກສາຄຸນນະພາບການເຮັດວຽກ ແລະ ການເກັບກຳຂໍ້ມູນຂອງທຸກສຸກສາລາໄວ້ໃຫ້ໄດ້ມາດຕະຖານນີ້ຕໍ່ໄປ.';
-
-    // 3. Anomaly Detection (ກວດຈັບຄວາມຜິດປົກກະຕິ)
-    const anomalies = filteredAllData.filter(r => parseFloat(r.accuracy_dhis2) < 70); // ຖືວ່າຕໍ່າກວ່າ 70% ແມ່ນຜິດປົກກະຕິ
-    const anomalyText = anomalies.length > 0
-      ? `ແຈ້ງເຕືອນ: ພົບ ${anomalies.length} ລາຍການທີ່ຜິດປົກກະຕິ (Accuracy ຕໍ່າກວ່າ 70%). ຕົວຢ່າງ: ຕົວຊີ້ວັດ "${anomalies[0].indicator_name}" ຢູ່ ${anomalies[0]['health center']} ຕ້ອງການການກວດສອບຄືນດ່ວນ!`
-      : `ບໍ່ພົບຂໍ້ມູນຜິດປົກກະຕິຮ້າຍແຮງໃນເງື່ອນໄຂການກັ່ນຕອງປະຈຸບັນ (ທຸກລາຍການມີຄວາມຖືກຕ້ອງຫຼາຍກວ່າ 70%).`;
-
-    // 4. Q&A Example (ຖາມ-ຕອບ)
-    // ຫາອົງປະກອບທີ່ຄະແນນຕໍ່າສຸດມາຕອບ
-    let lowestMetric = { label: '', value: 100 };
-    qualityMetrics.forEach(m => { if(m.value < lowestMetric.value && m.value > 0) lowestMetric = m; });
-    const qaQuestion = `Q: ອົງປະກອບຄຸນນະພາບໃດທີ່ພວກເຮົາຄວນເລັ່ງປັບປຸງດ່ວນທີ່ສຸດໃນຕອນນີ້?`;
-    const qaAnswer = `A: ຈາກການວິເຄາະຂໍ້ມູນ, ທ່ານຄວນເລັ່ງປັບປຸງໃນສ່ວນຂອງ "${lowestMetric.label}" ເຊິ່ງປະຈຸບັນໄດ້ຄະແນນສະເລ່ຍຕໍ່າທີ່ສຸດພຽງ ${lowestMetric.value}%.`;
-
-    return { trendText, recText, anomalyText, qaQuestion, qaAnswer };
-  }, [filteredAllData, causesData, qualityMetrics]);
-
-  // Update initial chat when data/filters change
-  useEffect(() => {
-    if (aiInsightsData) {
-      setChatHistory([
-        { role: 'user', content: aiInsightsData.qaQuestion.replace('Q: ', '') },
-        { role: 'ai', content: aiInsightsData.qaAnswer.replace('A: ', '') }
-      ]);
-    }
-  }, [aiInsightsData]);
-
-  // Handle User submitting a new question
-  const handleAskQuestion = () => {
-    if (!qaInput.trim()) return;
-    const newQ = qaInput.trim();
-    setChatHistory(prev => [...prev, { role: 'user', content: newQ }]);
-    setQaInput('');
-    setIsAiThinking(true);
-
-    // Simulate AI thinking and replying
-    setTimeout(() => {
-      let reply = "ຂໍອະໄພ, ລະບົບຖາມ-ຕອບປັດຈຸບັນເປັນພຽງຕົວແບບຈຳລອງ (Simulation) ເທົ່ານັ້ນ. ໃນລະບົບຕົວຈິງ ມັນຈະເຊື່ອມຕໍ່ກັບ AI ເພື່ອວິເຄາະຂໍ້ມູນ ແລະ ຕອບຄຳຖາມຂອງທ່ານ.";
-      
-      // Simple Keyword matching for fun
-      if (newQ.includes("ດີທີ່ສຸດ") || newQ.includes("ສູງສຸດ")) {
-        reply = "ຈາກຂໍ້ມູນທີ່ກັ່ນຕອງ, ຄວາມຖືກຕ້ອງ (Accuracy) ຫຼື ການມີບົດລາຍງານປະຈຳເດືອນ ແມ່ນມີແນວໂນ້ມໄດ້ຄະແນນສູງສຸດ. ທ່ານສາມາດເບິ່ງຄ່າສະເລ່ຍໄດ້ໃນສ່ວນທີ 2.";
-      } else if (newQ.includes("ເມືອງ") || newQ.includes("ແຂວງ")) {
-         reply = "ລະບົບກຳລັງສະແດງຜົນຕາມພື້ນທີ່ທີ່ທ່ານເລືອກໃນຕົວກອງ. ຖ້າທ່ານຢາກປຽບທຽບຂໍ້ມູນ, ລອງປ່ຽນຕົວກອງດ້ານເທິງເບິ່ງครับ.";
-      } else if (newQ.includes("ບັນຫາ") || newQ.includes("ຊ່ອງຫວ່າງ") || newQ.includes("ສາຍເຫດ")) {
-         reply = "ບັນຫາຫຼັກໆທີ່ພົບເຫັນ ສາມາດເບິ່ງໄດ້ຈາກສ່ວນທີ 3 (ສາຍເຫດ) ແລະ ສ່ວນທີ 4 (Gaps & Actions) ທີ່ຢູ່ດ້ານເທິງຂອງໜ້າຈໍ.";
-      }
-      
-      setChatHistory(prev => [...prev, { role: 'ai', content: reply }]);
-      setIsAiThinking(false);
-    }, 1500);
-  };
-
-
-  // ໂຫຼດ Library html2pdf ສໍາລັບການສົ່ງອອກ PDF ແບບແທ້ຈິງ
-  useEffect(() => {
-    const script = document.createElement('script');
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
-    script.async = true;
-    document.body.appendChild(script);
-    return () => {
-      if (document.body.contains(script)) {
-        document.body.removeChild(script);
-      }
-    };
-  }, []);
-
-  const handlePrint = () => {
-    if (!window.html2pdf) {
-      // ຖ້າ Library ຍັງໂຫຼດບໍ່ແລ້ວ ຫຼື ມີບັນຫາ ໃຫ້ໃຊ້ແບບ Print ທຳມະດາ
-      window.print();
-      return;
-    }
-
-    setIsGeneratingPdf(true);
+    <!-- Lucide Icons CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
     
-    // ແກ້ໄຂບັນຫາ PDF ຫວ່າງເປົ່າ ໂດຍການເລື່ອນໜ້າຈໍຂຶ້ນເທິງສຸດກ່ອນຖ່າຍພາບ
-    window.scrollTo(0, 0);
+    <!-- html2pdf.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 
-    const element = document.getElementById('dashboard-content');
-    const opt = {
-      margin:       0.3,
-      filename:     'RDQA-Report.pdf',
-      image:        { type: 'jpeg', quality: 1 },
-      html2canvas:  { 
-        scale: 2, 
-        useCORS: true, 
-        logging: false,
-        scrollY: 0, // ແກ້ໄຂບັນຫາຖ່າຍຕິດແຕ່ພື້ນຫຼັງເວລາເລື່ອນໜ້າຈໍ
-        windowWidth: document.documentElement.scrollWidth,
-        windowHeight: document.documentElement.scrollHeight
-      },
-      jsPDF:        { unit: 'in', format: 'a4', orientation: 'landscape' }
-    };
-
-    window.html2pdf().set(opt).from(element).save().then(() => {
-      setIsGeneratingPdf(false);
-    }).catch(err => {
-      console.error("PDF Generation Error:", err);
-      setIsGeneratingPdf(false);
-      window.print(); // Fallback ຖ້າມີບັນຫາ
-    });
-  };
-
-  return (
-    <div id="dashboard-content" className="min-h-screen bg-slate-50 font-sans text-slate-800 pb-12">
-      {/* Print Styles and Custom Fonts */}
-      <style dangerouslySetInnerHTML={{__html: `
+    <!-- Google Fonts: Noto Sans Lao -->
+    <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Lao:wght@300;400;500;600;700&display=swap');
         
-        body, .font-sans {
-          font-family: 'Noto Sans Lao', sans-serif !important;
+        body {
+            font-family: 'Noto Sans Lao', sans-serif !important;
+            background-color: #f8fafc; /* bg-slate-50 */
+            color: #1e293b; /* text-slate-800 */
         }
 
+        /* Print Styles */
         @media print {
-          .no-print { display: none !important; }
-          .print-break-inside-avoid { break-inside: avoid; }
-          body { background: white; }
-          .shadow-sm, .shadow-md { box-shadow: none !important; border: 1px solid #e2e8f0; }
+            .no-print { display: none !important; }
+            .print-break-inside-avoid { break-inside: avoid; }
+            body { background: white; }
+            .shadow-sm, .shadow-md { box-shadow: none !important; border: 1px solid #e2e8f0; }
         }
-      `}} />
 
-      {/* --- HEADER & CONTROLS (No Print) --- */}
-      <div className="bg-white shadow-sm border-b border-slate-200 sticky top-0 z-40 no-print">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
-            <h1 className="text-2xl font-bold text-indigo-900 flex items-center">
-              <LayoutDashboard className="mr-2" />
-              RDQA ລະບົບວິເຄາະຂໍ້ມູນຄຸນນະພາບ
-            </h1>
-            
-            <div className="flex gap-3" data-html2canvas-ignore="true">
-              <label className="cursor-pointer bg-blue-50 text-blue-700 hover:bg-blue-100 px-4 py-2 rounded-lg text-sm font-semibold flex items-center transition-colors border border-blue-200">
-                <Upload size={16} className="mr-2" />
-                ອັບໂຫຼດ 'ALL.csv'
-                <input type="file" accept=".csv" className="hidden" onChange={(e) => handleFileUpload(e, 'all')} />
-              </label>
-              <label className="cursor-pointer bg-blue-50 text-blue-700 hover:bg-blue-100 px-4 py-2 rounded-lg text-sm font-semibold flex items-center transition-colors border border-blue-200">
-                <Upload size={16} className="mr-2" />
-                ອັບໂຫຼດ 'KAP.csv'
-                <input type="file" accept=".csv" className="hidden" onChange={(e) => handleFileUpload(e, 'kap')} />
-              </label>
-              <button 
-                onClick={handlePrint} 
-                disabled={isGeneratingPdf}
-                className={`text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center transition-colors shadow-sm ${isGeneratingPdf ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
-              >
-                {isGeneratingPdf ? <Loader2 size={16} className="mr-2 animate-spin" /> : <FileDown size={16} className="mr-2" />}
-                {isGeneratingPdf ? 'ກຳລັງສ້າງ PDF...' : 'ສົ່ງອອກ PDF'}
-              </button>
-            </div>
-          </div>
+        /* Custom Scrollbar for Dropdowns */
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="min-h-screen pb-12">
 
-          {/* FILTERS */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-            <MultiSelect 
-              label="ແຂວງ (Province)" 
-              options={filterOptions.province} 
-              selected={filters.province} 
-              onChange={(v) => setFilters({...filters, province: v})} 
-            />
-            <MultiSelect 
-              label="ເມືອງ (District)" 
-              options={filterOptions.district} 
-              selected={filters.district} 
-              onChange={(v) => setFilters({...filters, district: v})} 
-            />
-            <MultiSelect 
-              label="ສຸກສາລາ (Health Center)" 
-              options={filterOptions.healthCenter} 
-              selected={filters.healthCenter} 
-              onChange={(v) => setFilters({...filters, healthCenter: v})} 
-            />
-            <MultiSelect 
-              label="ຮອບທີ (Round No)" 
-              options={filterOptions.roundNo} 
-              selected={filters.roundNo} 
-              onChange={(v) => setFilters({...filters, roundNo: v})} 
-            />
-            <MultiSelect 
-              label="ເດືອນ-ປີ (Month-Year)" 
-              options={filterOptions.monthYear} 
-              selected={filters.monthYear} 
-              onChange={(v) => setFilters({...filters, monthYear: v})} 
-            />
-          </div>
-        </div>
-      </div>
-
-      {allData.length === 0 ? (
-        <div className="max-w-7xl mx-auto mt-20 text-center text-slate-500">
-          <Upload size={48} className="mx-auto text-slate-300 mb-4" />
-          <p className="text-lg">ກະລຸນາອັບໂຫຼດໄຟລ໌ຂໍ້ມູນ (all.csv ແລະ kap.csv) ຢູ່ແຖບດ້ານເທິງເພື່ອເລີ່ມຕົ້ນ.</p>
-        </div>
-      ) : (
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-          
-          {/* SECTION 1: ຂໍ້ມູນທົ່ວໄປ */}
-          <section>
-            <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center border-l-4 border-blue-600 pl-3">
-              1. ຂໍ້ມູນທົ່ວໄປ
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {/* Card 1 */}
-              <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 flex flex-col items-center justify-center print-break-inside-avoid relative overflow-hidden">
-                <div className="absolute top-0 right-0 p-4 opacity-10 text-blue-600">
-                  <LayoutDashboard size={64} />
-                </div>
-                <span className="text-4xl font-extrabold text-blue-600 mb-2">{kpiData.districts}</span>
-                <span className="text-sm font-medium text-slate-500 uppercase tracking-wider">ຈໍານວນເມືອງທັງໝົດ</span>
-              </div>
-              {/* Card 2 */}
-              <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 flex flex-col items-center justify-center print-break-inside-avoid relative overflow-hidden">
-                <div className="absolute top-0 right-0 p-4 opacity-10 text-emerald-600">
-                  <LayoutDashboard size={64} />
-                </div>
-                <span className="text-4xl font-extrabold text-emerald-600 mb-2">{kpiData.healthCenters}</span>
-                <span className="text-sm font-medium text-slate-500 uppercase tracking-wider">ຈໍານວນສຸກສາລາ</span>
-              </div>
-              {/* Card 3 */}
-              <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 flex flex-col items-center justify-center print-break-inside-avoid relative overflow-hidden">
-                 <div className="absolute top-0 right-0 p-4 opacity-10 text-purple-600">
-                  <LayoutDashboard size={64} />
-                </div>
-                <span className="text-4xl font-extrabold text-purple-600 mb-2">{kpiData.indicators}</span>
-                <span className="text-sm font-medium text-slate-500 uppercase tracking-wider">ຈໍານວນຕົວຊີ້ວັດ</span>
-              </div>
-            </div>
-          </section>
-
-          {/* SECTION 2: ວິເຄາະອົງປະກອບຂອງຂໍ້ມູນຄຸນນະພາບ */}
-          <section>
-             <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center border-l-4 border-emerald-500 pl-3">
-              2. ການວິເຄາະອົງປະກອບຂອງຂໍ້ມູນຄຸນນະພາບ (ຄ່າສະເລ່ຍ)
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-              {qualityMetrics.map((item, idx) => (
-                <div key={idx} className="bg-white rounded-xl shadow-sm border border-slate-100 py-2.5 px-3 print-break-inside-avoid flex flex-col justify-between">
-                  <h3 className="text-[11px] leading-snug font-semibold text-slate-500 mb-1.5 line-clamp-2 h-auto min-h-[1.75rem]" title={item.label}>
-                    {item.label}
-                  </h3>
-                  <div>
-                    <div className="flex items-end justify-between mb-1.5">
-                      <span className="text-xl font-bold text-slate-800 leading-none">{item.value}<span className="text-xs text-slate-400 ml-0.5">%</span></span>
+    <div id="dashboard-content">
+        <!-- --- HEADER & CONTROLS (No Print) --- -->
+        <div class="bg-white shadow-sm border-b border-slate-200 sticky top-0 z-40 no-print">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+                    <h1 class="text-2xl font-bold text-indigo-900 flex items-center">
+                        <i data-lucide="layout-dashboard" class="mr-2"></i>
+                        RDQA ລະບົບວິເຄາະຂໍ້ມູນຄຸນນະພາບ
+                    </h1>
+                    
+                    <div class="flex gap-3" data-html2canvas-ignore="true">
+                        <label class="cursor-pointer bg-blue-50 text-blue-700 hover:bg-blue-100 px-4 py-2 rounded-lg text-sm font-semibold flex items-center transition-colors border border-blue-200">
+                            <i data-lucide="upload" class="mr-2 w-4 h-4"></i>
+                            ອັບໂຫຼດ 'ALL.csv'
+                            <input type="file" accept=".csv" class="hidden" id="upload-all" />
+                        </label>
+                        <label class="cursor-pointer bg-blue-50 text-blue-700 hover:bg-blue-100 px-4 py-2 rounded-lg text-sm font-semibold flex items-center transition-colors border border-blue-200">
+                            <i data-lucide="upload" class="mr-2 w-4 h-4"></i>
+                            ອັບໂຫຼດ 'KAP.csv'
+                            <input type="file" accept=".csv" class="hidden" id="upload-kap" />
+                        </label>
+                        <button id="btn-export-pdf" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center transition-colors shadow-sm">
+                            <i data-lucide="file-down" class="mr-2 w-4 h-4" id="icon-pdf-normal"></i>
+                            <i data-lucide="loader-2" class="mr-2 w-4 h-4 animate-spin hidden" id="icon-pdf-loading"></i>
+                            <span id="text-export-pdf">ສົ່ງອອກ PDF</span>
+                        </button>
                     </div>
-                    {/* Progress Bar */}
-                    <div className="w-full bg-slate-100 rounded-full h-1.5">
-                      <div 
-                        className={`h-1.5 rounded-full ${item.value >= 90 ? 'bg-emerald-500' : item.value >= 75 ? 'bg-yellow-400' : 'bg-red-500'}`}
-                        style={{ width: `${Math.min(100, Math.max(0, item.value))}%` }}
-                      ></div>
-                    </div>
-                  </div>
                 </div>
-              ))}
+
+                <!-- FILTERS -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4" id="filters-container">
+                    <!-- Dropdowns will be injected here via JS -->
+                </div>
             </div>
-          </section>
+        </div>
 
-          {/* SECTION 3: ສາຍເຫດທີ່ກ່ຽວຂ້ອງ */}
-          <section>
-            <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center border-l-4 border-amber-500 pl-3">
-              3. ສາຍເຫດທີ່ກ່ຽວຂ້ອງກັບຄວາມຜິດດ່ຽງ (Reasons)
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              
-              {/* Inaccuracy Reasons */}
-              <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5 print-break-inside-avoid">
-                <h3 className="font-semibold text-amber-600 mb-4 flex items-center">
-                  <AlertCircle size={18} className="mr-2"/>
-                  Reason of Inaccuracy (ສາຍເຫດຄວາມບໍ່ຖືກຕ້ອງ)
-                </h3>
-                {causesData.inaccuracy.length === 0 ? (
-                  <p className="text-sm text-slate-400 italic">ບໍ່ພົບຂໍ້ມູນ ຫຼື ບໍ່ມີບັນຫາຄວາມຜິດດ່ຽງ</p>
-                ) : (
-                  <div className="space-y-3">
-                    {causesData.inaccuracy.map((item, idx) => (
-                      <div key={idx} className="flex flex-col">
-                        <div className="flex justify-between text-sm mb-1">
-                          <span className="text-slate-700 font-medium truncate pr-4" title={item.name}>{item.name}</span>
-                          <span className="text-amber-600 font-bold bg-amber-50 px-2 rounded-full">{item.count}</span>
-                        </div>
-                        <div className="w-full bg-slate-100 rounded-full h-1.5">
-                          <div className="bg-amber-400 h-1.5 rounded-full" style={{ width: `${(item.count / filteredAllData.length) * 100}%` }}></div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+        <!-- EMPTY STATE -->
+        <div id="empty-state" class="max-w-7xl mx-auto mt-20 text-center text-slate-500">
+            <i data-lucide="upload" class="mx-auto text-slate-300 mb-4 w-12 h-12"></i>
+            <p class="text-lg">ກະລຸນາອັບໂຫຼດໄຟລ໌ຂໍ້ມູນ (all.csv ແລະ kap.csv) ຢູ່ແຖບດ້ານເທິງເພື່ອເລີ່ມຕົ້ນ.</p>
+        </div>
 
-               {/* Inconsistency Reasons */}
-               <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5 print-break-inside-avoid">
-                <h3 className="font-semibold text-orange-600 mb-4 flex items-center">
-                  <ListChecks size={18} className="mr-2"/>
-                  Reason of Inconsistency (ສາຍເຫດຄວາມບໍ່ຕໍ່ເນື່ອງ)
-                </h3>
-                {causesData.inconsistency.length === 0 ? (
-                  <p className="text-sm text-slate-400 italic">ບໍ່ພົບຂໍ້ມູນ ຫຼື ບໍ່ມີບັນຫາຄວາມບໍ່ຕໍ່ເນື່ອງ</p>
-                ) : (
-                  <div className="space-y-3">
-                    {causesData.inconsistency.map((item, idx) => (
-                      <div key={idx} className="flex flex-col">
-                        <div className="flex justify-between text-sm mb-1">
-                          <span className="text-slate-700 font-medium truncate pr-4" title={item.name}>{item.name}</span>
-                          <span className="text-orange-600 font-bold bg-orange-50 px-2 rounded-full">{item.count}</span>
-                        </div>
-                        <div className="w-full bg-slate-100 rounded-full h-1.5">
-                          <div className="bg-orange-400 h-1.5 rounded-full" style={{ width: `${(item.count / filteredAllData.length) * 100}%` }}></div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-            </div>
-          </section>
-
-          {/* SECTION 4: ສິ່ງທີ່ພົ້ນເດັ່ນ, ສິ່ງທ້າທາຍ ແລະ ວິທີການປັບປຸງ */}
-          <section>
-            <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center border-l-4 border-indigo-500 pl-3">
-              4. ສິ່ງທີ່ພົ້ນເດັ່ນ, ສິ່ງທ້າທາຍ/ຊ່ອງຫວ່າງທີ່ພົບ ແລະ ວິທີການປັບປຸງ (Gaps & Actions)
-            </h2>
+        <!-- MAIN DASHBOARD CONTENT -->
+        <div id="main-dashboard" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 hidden">
             
-            {kapData.length === 0 ? (
-               <div className="bg-blue-50 text-blue-700 p-4 rounded-xl border border-blue-100 text-sm">
-                 ກະລຸນາອັບໂຫຼດໄຟລ໌ 'kap.csv' ເພື່ອເບິ່ງຂໍ້ມູນໃນສ່ວນນີ້.
-               </div>
-            ) : gapsActionsData.length === 0 ? (
-               <div className="bg-slate-50 text-slate-500 p-6 rounded-xl border border-slate-200 text-center">
-                 ບໍ່ມີຂໍ້ມູນ Gaps & Actions ສໍາລັບເງື່ອນໄຂທີ່ທ່ານກັ່ນຕອງ.
-               </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-4">
-                {gapsActionsData.map((row, idx) => {
-                  
-                  // Connect to AllData to get Province/District context if needed
-                  const contextInfo = allData.find(a => a.event_id === row.event_id);
-                  const locationString = contextInfo 
+            <!-- SECTION 1: ຂໍ້ມູນທົ່ວໄປ -->
+            <section>
+                <h2 class="text-lg font-bold text-slate-800 mb-4 flex items-center border-l-4 border-blue-600 pl-3">
+                    1. ຂໍ້ມູນທົ່ວໄປ
+                </h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-6 flex flex-col items-center justify-center print-break-inside-avoid relative overflow-hidden">
+                        <div class="absolute top-0 right-0 p-4 opacity-10 text-blue-600">
+                            <i data-lucide="layout-dashboard" class="w-16 h-16"></i>
+                        </div>
+                        <span id="kpi-districts" class="text-4xl font-extrabold text-blue-600 mb-2">0</span>
+                        <span class="text-sm font-medium text-slate-500 uppercase tracking-wider">ຈໍານວນເມືອງທັງໝົດ</span>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-6 flex flex-col items-center justify-center print-break-inside-avoid relative overflow-hidden">
+                        <div class="absolute top-0 right-0 p-4 opacity-10 text-emerald-600">
+                            <i data-lucide="layout-dashboard" class="w-16 h-16"></i>
+                        </div>
+                        <span id="kpi-hcs" class="text-4xl font-extrabold text-emerald-600 mb-2">0</span>
+                        <span class="text-sm font-medium text-slate-500 uppercase tracking-wider">ຈໍານວນສຸກສາລາ</span>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-6 flex flex-col items-center justify-center print-break-inside-avoid relative overflow-hidden">
+                        <div class="absolute top-0 right-0 p-4 opacity-10 text-purple-600">
+                            <i data-lucide="layout-dashboard" class="w-16 h-16"></i>
+                        </div>
+                        <span id="kpi-indicators" class="text-4xl font-extrabold text-purple-600 mb-2">0</span>
+                        <span class="text-sm font-medium text-slate-500 uppercase tracking-wider">ຈໍານວນຕົວຊີ້ວັດ</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION 2: ວິເຄາະອົງປະກອບຂອງຂໍ້ມູນຄຸນນະພາບ -->
+            <section>
+                <h2 class="text-lg font-bold text-slate-800 mb-4 flex items-center border-l-4 border-emerald-500 pl-3">
+                    2. ການວິເຄາະອົງປະກອບຂອງຂໍ້ມູນຄຸນນະພາບ (ຄ່າສະເລ່ຍ)
+                </h2>
+                <div id="quality-metrics-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                    <!-- Metrics will be injected here -->
+                </div>
+            </section>
+
+            <!-- SECTION 3: ສາຍເຫດທີ່ກ່ຽວຂ້ອງ -->
+            <section>
+                <h2 class="text-lg font-bold text-slate-800 mb-4 flex items-center border-l-4 border-amber-500 pl-3">
+                    3. ສາຍເຫດທີ່ກ່ຽວຂ້ອງກັບຄວາມຜິດດ່ຽງ (Reasons)
+                </h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-5 print-break-inside-avoid">
+                        <h3 class="font-semibold text-amber-600 mb-4 flex items-center">
+                            <i data-lucide="alert-circle" class="mr-2 w-[18px] h-[18px]"></i>
+                            Reason of Inaccuracy (ສາຍເຫດຄວາມບໍ່ຖືກຕ້ອງ)
+                        </h3>
+                        <div id="inaccuracy-container" class="space-y-3"></div>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-5 print-break-inside-avoid">
+                        <h3 class="font-semibold text-orange-600 mb-4 flex items-center">
+                            <i data-lucide="list-checks" class="mr-2 w-[18px] h-[18px]"></i>
+                            Reason of Inconsistency (ສາຍເຫດຄວາມບໍ່ຕໍ່ເນື່ອງ)
+                        </h3>
+                        <div id="inconsistency-container" class="space-y-3"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION 4: ສິ່ງທີ່ພົ້ນເດັ່ນ, ສິ່ງທ້າທາຍ ແລະ ວິທີການປັບປຸງ -->
+            <section>
+                <h2 class="text-lg font-bold text-slate-800 mb-4 flex items-center border-l-4 border-indigo-500 pl-3">
+                    4. ສິ່ງທີ່ພົ້ນເດັ່ນ, ສິ່ງທ້າທາຍ/ຊ່ອງຫວ່າງທີ່ພົບ ແລະ ວິທີການປັບປຸງ (Gaps & Actions)
+                </h2>
+                <div id="gaps-actions-container" class="grid grid-cols-1 gap-4">
+                    <!-- Tables will be injected here -->
+                </div>
+            </section>
+
+            <!-- SECTION 5: AI Insights -->
+            <section class="mt-8 pt-6 border-t-2 border-dashed border-slate-200 print-break-inside-avoid">
+                <h2 class="text-lg font-bold text-transparent bg-clip-text bg-gradient-to-r from-violet-600 to-indigo-600 mb-6 flex items-center">
+                    <i data-lucide="sparkles" class="mr-2 text-violet-500 w-6 h-6"></i>
+                    5. ຜູ້ຊ່ວຍວິເຄາະອັດສະລິຍະ (AI Insights)
+                </h2>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- 1. Trend Analysis -->
+                    <div class="bg-gradient-to-br from-blue-50 to-white rounded-xl shadow-sm border border-blue-100 p-5">
+                        <h3 class="font-bold text-blue-800 mb-3 flex items-center">
+                            <i data-lucide="trending-up" class="mr-2 w-[18px] h-[18px]"></i>
+                            ວິເຄາະແນວໂນ້ມ (Trend Analysis)
+                        </h3>
+                        <p id="ai-trend-text" class="text-sm text-slate-700 leading-relaxed"></p>
+                    </div>
+
+                    <!-- 2. Actionable Recommendations -->
+                    <div class="bg-gradient-to-br from-emerald-50 to-white rounded-xl shadow-sm border border-emerald-100 p-5">
+                        <h3 class="font-bold text-emerald-800 mb-3 flex items-center">
+                            <i data-lucide="lightbulb" class="mr-2 w-[18px] h-[18px]"></i>
+                            ແນະນຳວິທີແກ້ໄຂ (Action Recommendations)
+                        </h3>
+                        <p id="ai-rec-text" class="text-sm text-slate-700 leading-relaxed"></p>
+                    </div>
+
+                    <!-- 3. Anomaly Detection -->
+                    <div class="bg-gradient-to-br from-rose-50 to-white rounded-xl shadow-sm border border-rose-100 p-5">
+                        <h3 class="font-bold text-rose-800 mb-3 flex items-center">
+                            <i data-lucide="shield-alert" class="mr-2 w-[18px] h-[18px]"></i>
+                            ກວດຈັບຄວາມຜິດປົກກະຕິ (Anomaly Detection)
+                        </h3>
+                        <p id="ai-anomaly-text" class="text-sm text-slate-700 leading-relaxed"></p>
+                    </div>
+
+                    <!-- 4. Q&A with Data -->
+                    <div class="bg-gradient-to-br from-violet-50 to-white rounded-xl shadow-sm border border-violet-100 p-5 relative overflow-hidden flex flex-col">
+                        <h3 class="font-bold text-violet-800 mb-3 flex items-center shrink-0">
+                            <i data-lucide="message-square-text" class="mr-2 w-[18px] h-[18px]"></i>
+                            ຖາມ-ຕອບ ກ່ຽວກັບຂໍ້ມູນ (Q&A)
+                        </h3>
+                        <div id="chat-history" class="bg-white rounded-lg p-3 border border-violet-100 shadow-sm text-sm space-y-3 relative z-10 flex-1 overflow-y-auto max-h-[160px] custom-scrollbar mb-3">
+                            <!-- Chat messages injected here -->
+                        </div>
+                        <!-- Interactive Input -->
+                        <div class="mt-auto flex gap-2 relative z-10 no-print shrink-0">
+                            <input type="text" id="qa-input" placeholder="ພິມຄຳຖາມຂອງທ່ານທີ່ນີ້..." class="w-full text-xs p-2 rounded border border-slate-200 bg-white focus:outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-400" />
+                            <button id="qa-submit" class="bg-violet-600 text-white px-3 py-1 text-xs rounded font-medium disabled:opacity-50 hover:bg-violet-700 transition-colors">ສົ່ງ</button>
+                        </div>
+                        <i data-lucide="sparkles" class="absolute -bottom-4 -right-4 text-violet-200 opacity-50 pointer-events-none w-20 h-20"></i>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Application Logic -->
+    <script>
+        // --- State Variables ---
+        let allData = [];
+        let kapData = [];
+        
+        const filters = {
+            province: [],
+            district: [],
+            healthCenter: [],
+            roundNo: [],
+            monthYear: []
+        };
+
+        const filterConfigs = [
+            { key: 'province', label: 'ແຂວງ (Province)' },
+            { key: 'district', label: 'ເມືອງ (District)' },
+            { key: 'healthCenter', label: 'ສຸກສາລາ (Health Center)' },
+            { key: 'roundNo', label: 'ຮອບທີ (Round No)' },
+            { key: 'monthYear', label: 'ເດືອນ-ປີ (Month-Year)' }
+        ];
+
+        let isGeneratingPdf = false;
+        let chatHistory = [];
+        let isAiThinking = false;
+        let openDropdownKey = null;
+
+        // --- Utility Functions ---
+        const parseCSV = (csvText) => {
+            const result = [];
+            const lines = csvText.split(/\r?\n(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+            if (lines.length === 0) return result;
+            const headers = lines[0].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(h => h.trim().replace(/^"|"$/g, ''));
+            for (let i = 1; i < lines.length; i++) {
+                if (!lines[i].trim()) continue;
+                const currentline = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+                const obj = {};
+                for (let j = 0; j < headers.length; j++) {
+                    let val = currentline[j] ? currentline[j].trim() : '';
+                    val = val.replace(/^"|"$/g, '').replace(/""/g, '"');
+                    obj[headers[j]] = val;
+                }
+                result.push(obj);
+            }
+            return result;
+        };
+
+        const getMonthYear = (dateString) => {
+            if (!dateString) return "";
+            try {
+                const dateObj = new Date(dateString);
+                if (!isNaN(dateObj)) {
+                    return `${String(dateObj.getMonth() + 1).padStart(2, '0')}-${dateObj.getFullYear()}`;
+                }
+                const parts = dateString.split('-');
+                if (parts.length >= 2 && parts[0].length === 4) {
+                    return `${parts[1]}-${parts[0]}`;
+                }
+                return dateString;
+            } catch (e) {
+                return dateString;
+            }
+        };
+
+        const isValueEmpty = (val) => !val || val.toString().trim() === '' || val.toString().trim() === '0';
+
+        // --- Core Application Logic ---
+
+        // File Upload Handlers
+        document.getElementById('upload-all').addEventListener('change', (e) => handleFileUpload(e, 'all'));
+        document.getElementById('upload-kap').addEventListener('change', (e) => handleFileUpload(e, 'kap'));
+
+        function handleFileUpload(e, type) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                const parsed = parseCSV(evt.target.result);
+                if (type === 'all') allData = parsed;
+                if (type === 'kap') kapData = parsed;
+                updateDashboard();
+            };
+            reader.readAsText(file);
+        }
+
+        // Main Update Cycle
+        function updateDashboard() {
+            if (allData.length === 0) {
+                document.getElementById('empty-state').classList.remove('hidden');
+                document.getElementById('main-dashboard').classList.add('hidden');
+                return;
+            }
+            
+            document.getElementById('empty-state').classList.add('hidden');
+            document.getElementById('main-dashboard').classList.remove('hidden');
+
+            const filteredAllData = getFilteredData();
+            
+            updateFilterUIs();
+            renderKPIs(filteredAllData);
+            renderQualityMetrics(filteredAllData);
+            renderCauses(filteredAllData);
+            renderGapsActions(filteredAllData);
+            renderAIInsights(filteredAllData);
+            
+            // Re-initialize icons for newly added elements
+            lucide.createIcons();
+        }
+
+        function getFilteredData() {
+            return allData.filter(row => {
+                const rowMY = getMonthYear(row['Date of visit']);
+                return (
+                    (filters.province.length === 0 || filters.province.includes(row.province)) &&
+                    (filters.district.length === 0 || filters.district.includes(row.district)) &&
+                    (filters.healthCenter.length === 0 || filters.healthCenter.includes(row['health center'])) &&
+                    (filters.roundNo.length === 0 || filters.roundNo.includes(row['Round no'])) &&
+                    (filters.monthYear.length === 0 || filters.monthYear.includes(rowMY))
+                );
+            });
+        }
+
+        // --- UI Rendering Functions ---
+
+        // Custom Dropdown Builder
+        function updateFilterUIs() {
+            const optionsMap = { province: new Set(), district: new Set(), healthCenter: new Set(), roundNo: new Set(), monthYear: new Set() };
+            
+            allData.forEach(row => {
+                const rowMY = getMonthYear(row['Date of visit']);
+                const matchProv = filters.province.length === 0 || filters.province.includes(row.province);
+                const matchDist = filters.district.length === 0 || filters.district.includes(row.district);
+                const matchHC = filters.healthCenter.length === 0 || filters.healthCenter.includes(row['health center']);
+                const matchRound = filters.roundNo.length === 0 || filters.roundNo.includes(row['Round no']);
+                const matchMY = filters.monthYear.length === 0 || filters.monthYear.includes(rowMY);
+
+                if (matchDist && matchHC && matchRound && matchMY && row.province) optionsMap.province.add(row.province);
+                if (matchProv && matchHC && matchRound && matchMY && row.district) optionsMap.district.add(row.district);
+                if (matchProv && matchDist && matchRound && matchMY && row['health center']) optionsMap.healthCenter.add(row['health center']);
+                if (matchProv && matchDist && matchHC && matchMY && row['Round no']) optionsMap.roundNo.add(row['Round no']);
+                if (matchProv && matchDist && matchHC && matchRound && rowMY) optionsMap.monthYear.add(rowMY);
+            });
+
+            const container = document.getElementById('filters-container');
+            container.innerHTML = ''; // Clear and rebuild
+
+            filterConfigs.forEach(config => {
+                const options = Array.from(optionsMap[config.key]).sort();
+                const selected = filters[config.key];
+                const isOpen = openDropdownKey === config.key;
+
+                let displayContent = '';
+                if (selected.length === 0) {
+                    displayContent = `<span class="text-slate-400 text-sm">ທັງໝົດ</span>`;
+                } else if (selected.length <= 2) {
+                    displayContent = selected.map(item => `<span class="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-md max-w-[100px] truncate inline-block">${item}</span>`).join('');
+                } else {
+                    displayContent = `<span class="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-md">ເລືອກ ${selected.length} ລາຍການ</span>`;
+                }
+
+                let optionsContent = '';
+                if (options.length === 0) {
+                    optionsContent = `<div class="p-3 text-sm text-slate-500 text-center">ບໍ່ມີຂໍ້ມູນ</div>`;
+                } else {
+                    optionsContent = options.map(opt => {
+                        const isSelected = selected.includes(opt);
+                        return `
+                            <div class="dropdown-option p-2.5 text-sm cursor-pointer flex items-center hover:bg-slate-50 ${isSelected ? 'bg-blue-50 text-blue-700' : 'text-slate-700'}" data-key="${config.key}" data-val="${opt}">
+                                <div class="w-4 h-4 rounded border mr-2 flex items-center justify-center ${isSelected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'}">
+                                    ${isSelected ? '<i data-lucide="check" class="w-3 h-3 text-white"></i>' : ''}
+                                </div>
+                                <span class="truncate">${opt || 'N/A'}</span>
+                            </div>
+                        `;
+                    }).join('');
+                }
+
+                container.innerHTML += `
+                    <div class="relative custom-dropdown" data-key="${config.key}">
+                        <label class="block text-xs font-semibold text-slate-500 mb-1">${config.label}</label>
+                        <div class="dropdown-trigger min-h-[40px] w-full bg-white border border-slate-300 rounded-lg p-2 flex items-center justify-between cursor-pointer hover:border-blue-500 transition-colors">
+                            <div class="flex flex-wrap gap-1 overflow-hidden pointer-events-none">
+                                ${displayContent}
+                            </div>
+                            <i data-lucide="chevron-down" class="w-4 h-4 text-slate-400 transition-transform dropdown-chevron ${isOpen ? 'rotate-180' : ''}"></i>
+                        </div>
+                        <div class="dropdown-menu absolute z-50 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl max-h-60 overflow-y-auto custom-scrollbar ${isOpen ? '' : 'hidden'}">
+                            ${optionsContent}
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        // Global Click listener for dropdowns
+        document.addEventListener('click', (e) => {
+            const trigger = e.target.closest('.dropdown-trigger');
+            const option = e.target.closest('.dropdown-option');
+            const dropdown = e.target.closest('.custom-dropdown');
+
+            if (trigger) {
+                const key = dropdown.dataset.key;
+                openDropdownKey = openDropdownKey === key ? null : key;
+                updateFilterUIs();
+                lucide.createIcons();
+            } else if (option) {
+                const key = option.dataset.key;
+                const val = option.dataset.val;
+                if (filters[key].includes(val)) {
+                    filters[key] = filters[key].filter(v => v !== val);
+                } else {
+                    filters[key].push(val);
+                }
+                updateDashboard();
+            } else if (!dropdown) {
+                if (openDropdownKey !== null) {
+                    openDropdownKey = null;
+                    updateFilterUIs();
+                    lucide.createIcons();
+                }
+            }
+        });
+
+        // SECTION 1
+        function renderKPIs(filteredAllData) {
+            const distSet = new Set();
+            const hcSet = new Set();
+            const indSet = new Set();
+
+            filteredAllData.forEach(r => {
+                if (r.district) distSet.add(r.district);
+                if (r['health center']) hcSet.add(r['health center']);
+                if (r.indicator_name) indSet.add(r.indicator_name);
+            });
+
+            document.getElementById('kpi-districts').innerText = distSet.size;
+            document.getElementById('kpi-hcs').innerText = hcSet.size;
+            document.getElementById('kpi-indicators').innerText = indSet.size;
+        }
+
+        // SECTION 2
+        function renderQualityMetrics(filteredAllData) {
+            const keys = [
+                'completeness_monthly_report', 'monthly report availability', 'monthly report standard',
+                'monthly report deadline submission', 'completeness source document', 'source document availavility',
+                'source document standard', 'accuracy_dhis2', 'consistency', 'system_assesment'
+            ];
+            
+            const sums = {};
+            const counts = {};
+            keys.forEach(k => { sums[k] = 0; counts[k] = 0; });
+
+            filteredAllData.forEach(row => {
+                keys.forEach(key => {
+                    let val = parseFloat(row[key]);
+                    if (!isNaN(val)) {
+                        sums[key] += val;
+                        counts[key] += 1;
+                    }
+                });
+            });
+
+            let html = '';
+            keys.forEach(key => {
+                const avgValue = counts[key] > 0 ? parseFloat((sums[key] / counts[key]).toFixed(1)) : 0;
+                const label = key.split('_').join(' ').replace(/\b\w/g, l => l.toUpperCase());
+                let colorClass = avgValue >= 90 ? 'bg-emerald-500' : avgValue >= 75 ? 'bg-yellow-400' : 'bg-red-500';
+                
+                html += `
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-100 py-2.5 px-3 print-break-inside-avoid flex flex-col justify-between">
+                        <h3 class="text-[11px] leading-snug font-semibold text-slate-500 mb-1.5 line-clamp-2 h-auto min-h-[1.75rem]" title="${label}">
+                            ${label}
+                        </h3>
+                        <div>
+                            <div class="flex items-end justify-between mb-1.5">
+                                <span class="text-xl font-bold text-slate-800 leading-none">${avgValue}<span class="text-xs text-slate-400 ml-0.5">%</span></span>
+                            </div>
+                            <div class="w-full bg-slate-100 rounded-full h-1.5">
+                                <div class="h-1.5 rounded-full ${colorClass}" style="width: ${Math.min(100, Math.max(0, avgValue))}%"></div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            document.getElementById('quality-metrics-container').innerHTML = html;
+        }
+
+        // SECTION 3
+        function renderCauses(filteredAllData) {
+            const inaccuracy = {};
+            const inconsistency = {};
+
+            filteredAllData.forEach(row => {
+                const rInacc = row['reason of inaccuracy'];
+                const rIncons = row['reason of inconsistency'];
+
+                if (rInacc && rInacc !== 'No discrepancy - ບໍ່ມີຄ່າຜິດດ່ຽງ' && rInacc.trim() !== '') {
+                    rInacc.split(',').forEach(s => {
+                        const p = s.trim();
+                        inaccuracy[p] = (inaccuracy[p] || 0) + 1;
+                    });
+                }
+                if (rIncons && rIncons !== 'No consistency - ບໍ່ມີບັນຫາຄວາມບໍ່ຕໍ່ເນື່ອງຂອງຂໍ້ມູນ' && rIncons.trim() !== '') {
+                    rIncons.split(',').forEach(s => {
+                        const p = s.trim();
+                        inconsistency[p] = (inconsistency[p] || 0) + 1;
+                    });
+                }
+            });
+
+            const sortObj = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]).map(e => ({ name: e[0], count: e[1] }));
+            const inaccArr = sortObj(inaccuracy);
+            const inconsArr = sortObj(inconsistency);
+
+            const buildBars = (arr, colorText, colorBg, colorBar) => {
+                if (arr.length === 0) return `<p class="text-sm text-slate-400 italic">ບໍ່ພົບຂໍ້ມູນ ຫຼື ບໍ່ມີບັນຫາຜິດດ່ຽງ</p>`;
+                return arr.map(item => `
+                    <div class="flex flex-col">
+                        <div class="flex justify-between text-sm mb-1">
+                            <span class="text-slate-700 font-medium truncate pr-4" title="${item.name}">${item.name}</span>
+                            <span class="${colorText} font-bold ${colorBg} px-2 rounded-full">${item.count}</span>
+                        </div>
+                        <div class="w-full bg-slate-100 rounded-full h-1.5">
+                            <div class="${colorBar} h-1.5 rounded-full" style="width: ${(item.count / filteredAllData.length) * 100}%"></div>
+                        </div>
+                    </div>
+                `).join('');
+            };
+
+            document.getElementById('inaccuracy-container').innerHTML = buildBars(inaccArr, 'text-amber-600', 'bg-amber-50', 'bg-amber-400');
+            document.getElementById('inconsistency-container').innerHTML = buildBars(inconsArr, 'text-orange-600', 'bg-orange-50', 'bg-orange-400');
+        }
+
+        // SECTION 4
+        function renderGapsActions(filteredAllData) {
+            const activeEventIds = new Set(filteredAllData.map(r => r.event_id).filter(id => id));
+            const activeKap = kapData.filter(row => activeEventIds.has(row.event_id));
+            const container = document.getElementById('gaps-actions-container');
+
+            if (kapData.length === 0) {
+                container.innerHTML = `<div class="bg-blue-50 text-blue-700 p-4 rounded-xl border border-blue-100 text-sm">ກະລຸນາອັບໂຫຼດໄຟລ໌ 'kap.csv' ເພື່ອເບິ່ງຂໍ້ມູນໃນສ່ວນນີ້.</div>`;
+                return;
+            }
+            if (activeKap.length === 0) {
+                container.innerHTML = `<div class="bg-slate-50 text-slate-500 p-6 rounded-xl border border-slate-200 text-center">ບໍ່ມີຂໍ້ມູນ Gaps & Actions ສໍາລັບເງື່ອນໄຂທີ່ທ່ານກັ່ນຕອງ.</div>`;
+                return;
+            }
+
+            let html = '';
+            activeKap.forEach(row => {
+                const contextInfo = allData.find(a => a.event_id === row.event_id);
+                const locationString = contextInfo 
                     ? `${contextInfo.province} > ${contextInfo.district} > ${contextInfo['health center']}`
                     : `Event ID: ${row.event_id}`;
 
-                  const items = [
+                const items = [
                     { title: "Monthly Report (ບົດລາຍງານປະຈໍາເດືອນ)", gap: row['Monthly report gaps'], action: row['Monthly report actions'] },
                     { title: "Source Document (ເອກະສານອ້າງອີງ)", gap: row['Source document gaps'], action: row['Source document actions'] },
                     { title: "Accuracy (ຄວາມຖືກຕ້ອງ)", gap: row['Accuracy gaps'], action: row['Accuracy Action'] },
                     { title: "Consistency (ຄວາມຕໍ່ເນື່ອງ)", gap: row['consistency gaps'], action: row['consistency actions'] }
-                  ];
+                ];
 
-                  // ສ້າງຟັງຊັນຊ່ວຍກວດສອບວ່າຄ່າວ່າງເປົ່າ ຫຼື ເປັນເລກ 0 ບໍ່
-                  const isValueEmpty = (val) => !val || val.toString().trim() === '' || val.toString().trim() === '0';
+                const hasContent = items.some(i => !isValueEmpty(i.gap) || !isValueEmpty(i.action));
+                if (!hasContent) return;
 
-                  // Only show rows that actually have some content (ບໍ່ເປັນ 0 ແລະ ບໍ່ວ່າງເປົ່າ)
-                  const hasContent = items.some(i => !isValueEmpty(i.gap) || !isValueEmpty(i.action));
-                  if (!hasContent) return null;
+                let trs = '';
+                items.forEach(item => {
+                    if(isValueEmpty(item.gap) && isValueEmpty(item.action)) return;
+                    trs += `
+                        <tr class="hover:bg-slate-50/50">
+                            <td class="px-4 py-3 font-medium text-slate-700 align-top">${item.title}</td>
+                            <td class="px-4 py-3 text-slate-600 align-top whitespace-pre-line">${isValueEmpty(item.gap) ? '-' : item.gap}</td>
+                            <td class="px-4 py-3 text-slate-600 align-top whitespace-pre-line">${isValueEmpty(item.action) ? '-' : item.action}</td>
+                        </tr>
+                    `;
+                });
 
-                  return (
-                    <div key={idx} className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden print-break-inside-avoid mb-2">
-                      <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 flex items-center text-sm font-semibold text-slate-700">
-                         <FileText size={16} className="mr-2 text-indigo-500" />
-                         {locationString}
-                      </div>
-                      <div className="p-0">
-                        <table className="w-full text-sm text-left">
-                          <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
-                            <tr>
-                              <th className="px-4 py-2 w-1/4">ໝວດໝູ່</th>
-                              <th className="px-4 py-2 w-3/8 text-red-600">Gaps (ຊ່ອງຫວ່າງ/ບັນຫາ)</th>
-                              <th className="px-4 py-2 w-3/8 text-emerald-600">Actions (ວິທີແກ້ໄຂ)</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {items.map((item, i) => {
-                               // ເຊື່ອງແຖວຖ້າທັງສອງຫ້ອງເປັນຄ່າວ່າງ ຫຼື 0
-                               if(isValueEmpty(item.gap) && isValueEmpty(item.action)) return null;
-                               
-                               return (
-                                <tr key={i} className="hover:bg-slate-50/50">
-                                  <td className="px-4 py-3 font-medium text-slate-700 align-top">{item.title}</td>
-                                  <td className="px-4 py-3 text-slate-600 align-top whitespace-pre-line">{isValueEmpty(item.gap) ? '-' : item.gap}</td>
-                                  <td className="px-4 py-3 text-slate-600 align-top whitespace-pre-line">{isValueEmpty(item.action) ? '-' : item.action}</td>
-                                </tr>
-                               )
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
+                html += `
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden print-break-inside-avoid mb-2">
+                        <div class="bg-slate-50 px-4 py-2 border-b border-slate-200 flex items-center text-sm font-semibold text-slate-700">
+                            <i data-lucide="file-text" class="mr-2 w-4 h-4 text-indigo-500"></i>
+                            ${locationString}
+                        </div>
+                        <div class="p-0">
+                            <table class="w-full text-sm text-left">
+                                <thead class="bg-slate-50 text-slate-500 text-xs uppercase">
+                                    <tr>
+                                        <th class="px-4 py-2 w-1/4">ໝວດໝູ່</th>
+                                        <th class="px-4 py-2 w-3/8 text-red-600">Gaps (ຊ່ອງຫວ່າງ/ບັນຫາ)</th>
+                                        <th class="px-4 py-2 w-3/8 text-emerald-600">Actions (ວິທີແກ້ໄຂ)</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100">
+                                    ${trs}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                  )
-                })}
-              </div>
-            )}
-          </section>
+                `;
+            });
+            container.innerHTML = html;
+        }
 
-          {/* SECTION 5: AI Insights */}
-          {aiInsightsData && (
-            <section className="mt-8 pt-6 border-t-2 border-dashed border-slate-200 print-break-inside-avoid">
-              <h2 className="text-lg font-bold text-transparent bg-clip-text bg-gradient-to-r from-violet-600 to-indigo-600 mb-6 flex items-center">
-                <Sparkles className="mr-2 text-violet-500" size={24}/>
-                5. ຜູ້ຊ່ວຍວິເຄາະອັດສະລິຍະ (AI Insights)
-              </h2>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        // SECTION 5
+        let aiInsightsDataCache = null;
+        function renderAIInsights(filteredAllData) {
+            if (filteredAllData.length === 0) return;
+
+            // 1. Trend Analysis
+            const avgAcc = (filteredAllData.reduce((sum, r) => sum + (parseFloat(r.accuracy_dhis2) || 0), 0) / filteredAllData.length).toFixed(1);
+            
+            // Recalculate top cause locally
+            const inaccuracy = {};
+            filteredAllData.forEach(row => {
+                const rInacc = row['reason of inaccuracy'];
+                if (rInacc && rInacc !== 'No discrepancy - ບໍ່ມີຄ່າຜິດດ່ຽງ' && rInacc.trim() !== '') {
+                    rInacc.split(',').forEach(s => { const p=s.trim(); inaccuracy[p] = (inaccuracy[p] || 0)+1; });
+                }
+            });
+            const sortObj = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
+            const inaccArr = sortObj(inaccuracy);
+            const topCause = inaccArr.length > 0 ? inaccArr[0][0] : '-';
+            
+            const trendText = `ຈາກການກັ່ນຕອງຂໍ້ມູນປະຈຸບັນ, ຄ່າສະເລ່ຍຄວາມຖືກຕ້ອງ (Accuracy) ຢູ່ທີ່ ${avgAcc}%. ໂດຍມີແນວໂນ້ມຄວາມຜິດດ່ຽງມາຈາກສາເຫດຫຼັກຄື "${topCause}".`;
+
+            // 2. Recommendations
+            const hcScores = {};
+            filteredAllData.forEach(r => {
+                const hc = r['health center'];
+                if(hc) {
+                    if(!hcScores[hc]) hcScores[hc] = { sum: 0, count: 0 };
+                    hcScores[hc].sum += (parseFloat(r.accuracy_dhis2) || 0);
+                    hcScores[hc].count += 1;
+                }
+            });
+            let worstHc = { name: '', score: 100 };
+            Object.keys(hcScores).forEach(hc => {
+                const avg = hcScores[hc].sum / hcScores[hc].count;
+                if (avg < worstHc.score) worstHc = { name: hc, score: avg };
+            });
+            const recText = worstHc.name 
+                ? `ຄວນຈັດບຸລິມະສິດລົງຕິດຕາມ ແລະ ຊ່ວຍເຫຼືອ "ສຸກສາລາ ${worstHc.name}" ເປັນພິເສດ ເນື່ອງຈາກມີຄະແນນຄວາມຖືກຕ້ອງສະເລ່ຍຕໍ່າສຸດ (${worstHc.score.toFixed(1)}%). ພ້ອມທັງແນະນຳໃຫ້ທົບທວນການບັນທຶກເອກະສານອ້າງອີງຄືນໃໝ່ໃຫ້ຮັດກຸມຂຶ້ນ.` 
+                : 'ຮັກສາຄຸນນະພາບການເຮັດວຽກ ແລະ ການເກັບກຳຂໍ້ມູນຂອງທຸກສຸກສາລາໄວ້ໃຫ້ໄດ້ມາດຕະຖານນີ້ຕໍ່ໄປ.';
+
+            // 3. Anomaly
+            const anomalies = filteredAllData.filter(r => parseFloat(r.accuracy_dhis2) < 70);
+            const anomalyText = anomalies.length > 0
+                ? `ແຈ້ງເຕືອນ: ພົບ ${anomalies.length} ລາຍການທີ່ຜິດປົກກະຕິ (Accuracy ຕໍ່າກວ່າ 70%). ຕົວຢ່າງ: ຕົວຊີ້ວັດ "${anomalies[0].indicator_name}" ຢູ່ ${anomalies[0]['health center']} ຕ້ອງການການກວດສອບຄືນດ່ວນ!`
+                : `ບໍ່ພົບຂໍ້ມູນຜິດປົກກະຕິຮ້າຍແຮງໃນເງື່ອນໄຂການກັ່ນຕອງປະຈຸບັນ (ທຸກລາຍການມີຄວາມຖືກຕ້ອງຫຼາຍກວ່າ 70%).`;
+
+            // 4. Q&A
+            const keys = ['completeness_monthly_report', 'monthly report availability', 'monthly report standard', 'monthly report deadline submission', 'completeness source document', 'source document availavility', 'source document standard', 'accuracy_dhis2', 'consistency', 'system_assesment'];
+            const sums = {}; const counts = {}; keys.forEach(k => { sums[k] = 0; counts[k] = 0; });
+            filteredAllData.forEach(r => { keys.forEach(k => { let v = parseFloat(r[k]); if(!isNaN(v)){ sums[k]+=v; counts[k]++; } }); });
+            let lowestMetric = { label: '', value: 100 };
+            keys.forEach(k => {
+                const avg = counts[k]>0 ? sums[k]/counts[k] : 0;
+                if(avg < lowestMetric.value && avg > 0) {
+                    lowestMetric = { label: k.split('_').join(' ').replace(/\b\w/g, l => l.toUpperCase()), value: parseFloat(avg.toFixed(1)) };
+                }
+            });
+            const qaQuestion = `ອົງປະກອບຄຸນນະພາບໃດທີ່ພວກເຮົາຄວນເລັ່ງປັບປຸງດ່ວນທີ່ສຸດໃນຕອນນີ້?`;
+            const qaAnswer = `ຈາກການວິເຄາະຂໍ້ມູນ, ທ່ານຄວນເລັ່ງປັບປຸງໃນສ່ວນຂອງ "${lowestMetric.label}" ເຊິ່ງປະຈຸບັນໄດ້ຄະແນນສະເລ່ຍຕໍ່າທີ່ສຸດພຽງ ${lowestMetric.value}%.`;
+
+            document.getElementById('ai-trend-text').innerText = trendText;
+            document.getElementById('ai-rec-text').innerText = recText;
+            document.getElementById('ai-anomaly-text').innerText = anomalyText;
+
+            // Setup Chat
+            aiInsightsDataCache = { qaQuestion, qaAnswer };
+            chatHistory = [
+                { role: 'user', content: qaQuestion },
+                { role: 'ai', content: qaAnswer }
+            ];
+            renderChatUI();
+        }
+
+        // Chat Interaction Logic
+        function renderChatUI() {
+            const container = document.getElementById('chat-history');
+            let html = chatHistory.map(msg => `
+                <div class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}">
+                    <div class="max-w-[90%] rounded-lg p-2.5 text-xs leading-relaxed ${msg.role === 'user' ? 'bg-violet-100 text-violet-800 rounded-tr-none' : 'bg-slate-50 border border-slate-100 text-slate-700 rounded-tl-none'}">
+                        ${msg.role === 'ai' ? '<i data-lucide="sparkles" class="inline mr-1 text-violet-500 mb-0.5 w-3 h-3"></i>' : ''}
+                        ${msg.content}
+                    </div>
+                </div>
+            `).join('');
+
+            if (isAiThinking) {
+                html += `
+                    <div class="flex justify-start">
+                        <div class="bg-slate-50 border border-slate-100 text-slate-500 rounded-lg rounded-tl-none p-2.5 text-xs flex items-center">
+                            <i data-lucide="loader-2" class="animate-spin mr-1.5 w-3 h-3"></i> ກຳລັງວິເຄາະ...
+                        </div>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+            container.scrollTop = container.scrollHeight;
+            lucide.createIcons();
+            
+            const btn = document.getElementById('qa-submit');
+            const input = document.getElementById('qa-input');
+            btn.disabled = isAiThinking || !input.value.trim();
+        }
+
+        const handleAskQuestion = () => {
+            const input = document.getElementById('qa-input');
+            const newQ = input.value.trim();
+            if (!newQ) return;
+            
+            chatHistory.push({ role: 'user', content: newQ });
+            input.value = '';
+            isAiThinking = true;
+            renderChatUI();
+
+            setTimeout(() => {
+                let reply = "ຂໍອະໄພ, ລະບົບຖາມ-ຕອບປັດຈຸບັນເປັນພຽງຕົວແບບຈຳລອງ (Simulation) ເທົ່ານັ້ນ. ໃນລະບົບຕົວຈິງ ມັນຈະເຊື່ອມຕໍ່ກັບ AI ເພື່ອວິເຄາະຂໍ້ມູນ ແລະ ຕອບຄຳຖາມຂອງທ່ານ.";
                 
-                {/* 1. Trend Analysis */}
-                <div className="bg-gradient-to-br from-blue-50 to-white rounded-xl shadow-sm border border-blue-100 p-5">
-                  <h3 className="font-bold text-blue-800 mb-3 flex items-center">
-                    <TrendingUp size={18} className="mr-2"/>
-                    ວິເຄາະແນວໂນ້ມ (Trend Analysis)
-                  </h3>
-                  <p className="text-sm text-slate-700 leading-relaxed">
-                    {aiInsightsData.trendText}
-                  </p>
-                </div>
+                if (newQ.includes("ດີທີ່ສຸດ") || newQ.includes("ສູງສຸດ")) {
+                    reply = "ຈາກຂໍ້ມູນທີ່ກັ່ນຕອງ, ຄວາມຖືກຕ້ອງ (Accuracy) ຫຼື ການມີບົດລາຍງານປະຈຳເດືອນ ແມ່ນມີແນວໂນ້ມໄດ້ຄະແນນສູງສຸດ. ທ່ານສາມາດເບິ່ງຄ່າສະເລ່ຍໄດ້ໃນສ່ວນທີ 2.";
+                } else if (newQ.includes("ເມືອງ") || newQ.includes("ແຂວງ")) {
+                    reply = "ລະບົບກຳລັງສະແດງຜົນຕາມພື້ນທີ່ທີ່ທ່ານເລືອກໃນຕົວກອງ. ຖ້າທ່ານຢາກປຽບທຽບຂໍ້ມູນ, ລອງປ່ຽນຕົວກອງດ້ານເທິງເບິ່ງ.";
+                } else if (newQ.includes("ບັນຫາ") || newQ.includes("ຊ່ອງຫວ່າງ") || newQ.includes("ສາຍເຫດ")) {
+                    reply = "ບັນຫາຫຼັກໆທີ່ພົບເຫັນ ສາມາດເບິ່ງໄດ້ຈາກສ່ວນທີ 3 (ສາຍເຫດ) ແລະ ສ່ວນທີ 4 (Gaps & Actions) ທີ່ຢູ່ດ້ານເທິງຂອງໜ້າຈໍ.";
+                }
+                
+                chatHistory.push({ role: 'ai', content: reply });
+                isAiThinking = false;
+                renderChatUI();
+            }, 1500);
+        };
 
-                {/* 2. Actionable Recommendations */}
-                <div className="bg-gradient-to-br from-emerald-50 to-white rounded-xl shadow-sm border border-emerald-100 p-5">
-                  <h3 className="font-bold text-emerald-800 mb-3 flex items-center">
-                    <Lightbulb size={18} className="mr-2"/>
-                    ແນະນຳວິທີແກ້ໄຂ (Action Recommendations)
-                  </h3>
-                  <p className="text-sm text-slate-700 leading-relaxed">
-                    {aiInsightsData.recText}
-                  </p>
-                </div>
+        document.getElementById('qa-submit').addEventListener('click', handleAskQuestion);
+        document.getElementById('qa-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') handleAskQuestion();
+        });
+        document.getElementById('qa-input').addEventListener('input', () => {
+            document.getElementById('qa-submit').disabled = isAiThinking || !document.getElementById('qa-input').value.trim();
+        });
 
-                {/* 3. Anomaly Detection */}
-                <div className="bg-gradient-to-br from-rose-50 to-white rounded-xl shadow-sm border border-rose-100 p-5">
-                  <h3 className="font-bold text-rose-800 mb-3 flex items-center">
-                    <ShieldAlert size={18} className="mr-2"/>
-                    ກວດຈັບຄວາມຜິດປົກກະຕິ (Anomaly Detection)
-                  </h3>
-                  <p className="text-sm text-slate-700 leading-relaxed">
-                    {aiInsightsData.anomalyText}
-                  </p>
-                </div>
+        // --- PDF Export Logic ---
+        document.getElementById('btn-export-pdf').addEventListener('click', () => {
+            if (!window.html2pdf) {
+                window.print();
+                return;
+            }
 
-                {/* 4. Q&A with Data */}
-                <div className="bg-gradient-to-br from-violet-50 to-white rounded-xl shadow-sm border border-violet-100 p-5 relative overflow-hidden flex flex-col">
-                  <h3 className="font-bold text-violet-800 mb-3 flex items-center shrink-0">
-                    <MessageSquareText size={18} className="mr-2"/>
-                    ຖາມ-ຕອບ ກ່ຽວກັບຂໍ້ມູນ (Q&A)
-                  </h3>
-                  <div className="bg-white rounded-lg p-3 border border-violet-100 shadow-sm text-sm space-y-3 relative z-10 flex-1 overflow-y-auto max-h-[160px] mb-3">
-                    {chatHistory.map((msg, i) => (
-                      <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                        <div className={`max-w-[90%] rounded-lg p-2.5 text-xs leading-relaxed ${msg.role === 'user' ? 'bg-violet-100 text-violet-800 rounded-tr-none' : 'bg-slate-50 border border-slate-100 text-slate-700 rounded-tl-none'}`}>
-                          {msg.role === 'ai' && <Sparkles size={12} className="inline mr-1 text-violet-500 mb-0.5" />}
-                          {msg.content}
-                        </div>
-                      </div>
-                    ))}
-                    {isAiThinking && (
-                      <div className="flex justify-start">
-                        <div className="bg-slate-50 border border-slate-100 text-slate-500 rounded-lg rounded-tl-none p-2.5 text-xs flex items-center">
-                          <Loader2 size={12} className="animate-spin mr-1.5" /> ກຳລັງວິເຄາະ...
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  {/* Interactive Input */}
-                  <div className="mt-auto flex gap-2 relative z-10 no-print shrink-0">
-                    <input 
-                      type="text" 
-                      placeholder="ພິມຄຳຖາມຂອງທ່ານທີ່ນີ້..." 
-                      value={qaInput}
-                      onChange={(e) => setQaInput(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleAskQuestion()}
-                      className="w-full text-xs p-2 rounded border border-slate-200 bg-white focus:outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-400" 
-                    />
-                    <button 
-                      onClick={handleAskQuestion}
-                      disabled={isAiThinking || !qaInput.trim()}
-                      className="bg-violet-600 text-white px-3 py-1 text-xs rounded font-medium disabled:opacity-50 hover:bg-violet-700 transition-colors"
-                    >
-                      ສົ່ງ
-                    </button>
-                  </div>
-                  <Sparkles className="absolute -bottom-4 -right-4 text-violet-200 opacity-50 pointer-events-none" size={80} />
-                </div>
+            const btn = document.getElementById('btn-export-pdf');
+            const iconNormal = document.getElementById('icon-pdf-normal');
+            const iconLoading = document.getElementById('icon-pdf-loading');
+            const textEl = document.getElementById('text-export-pdf');
 
-              </div>
-            </section>
-          )}
+            // Update UI to loading
+            btn.classList.add('bg-slate-400', 'cursor-not-allowed');
+            btn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+            iconNormal.classList.add('hidden');
+            iconLoading.classList.remove('hidden');
+            textEl.innerText = 'ກຳລັງສ້າງ PDF...';
+            
+            window.scrollTo(0, 0);
 
-        </div>
-      )}
-    </div>
-  );
-}
+            const element = document.getElementById('dashboard-content');
+            const opt = {
+                margin:       0.3,
+                filename:     'RDQA-Report.pdf',
+                image:        { type: 'jpeg', quality: 1 },
+                html2canvas:  { 
+                    scale: 2, 
+                    useCORS: true, 
+                    logging: false,
+                    scrollY: 0,
+                    windowWidth: document.documentElement.scrollWidth,
+                    windowHeight: document.documentElement.scrollHeight
+                },
+                jsPDF:        { unit: 'in', format: 'a4', orientation: 'landscape' }
+            };
+
+            window.html2pdf().set(opt).from(element).save().then(() => {
+                // Reset UI
+                btn.classList.remove('bg-slate-400', 'cursor-not-allowed');
+                btn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+                iconNormal.classList.remove('hidden');
+                iconLoading.classList.add('hidden');
+                textEl.innerText = 'ສົ່ງອອກ PDF';
+            }).catch(err => {
+                console.error("PDF Generation Error:", err);
+                btn.classList.remove('bg-slate-400', 'cursor-not-allowed');
+                btn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+                iconNormal.classList.remove('hidden');
+                iconLoading.classList.add('hidden');
+                textEl.innerText = 'ສົ່ງອອກ PDF';
+                window.print();
+            });
+        });
+
+        // Initialize icons on first load
+        lucide.createIcons();
+
+    </script>
+</body>
+</html>
